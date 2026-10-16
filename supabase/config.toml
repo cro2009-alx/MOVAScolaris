@@ -1,0 +1,7 @@
+project_id = "scolaris"
+
+[functions.create-secretary]
+verify_jwt = true
+
+[functions.create-founder]
+verify_jwt = false

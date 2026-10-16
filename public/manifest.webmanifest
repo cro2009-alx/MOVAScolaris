@@ -1,0 +1,11 @@
+{
+  "name": "Scolaris",
+  "short_name": "Scolaris",
+  "description": "Gestion des frais de scolarité de votre école",
+  "lang": "fr",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f5f0",
+  "theme_color": "#1f5e55",
+  "icons": [{ "src": "/scolaris.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}
