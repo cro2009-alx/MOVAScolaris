@@ -282,6 +282,55 @@ const initials = (name: string) =>
     .slice(0, 2)
     .join("")
     .toUpperCase();
+
+const asText = (value: unknown) =>
+  typeof value === "string" ? value : value == null ? "" : String(value);
+const describeActivity = (
+  action: string,
+  details: Record<string, unknown> | null | undefined,
+  who: string,
+  studentNames: Map<string, string>,
+  memberNames: Map<string, string>,
+) => {
+  const d = details ?? {};
+  const student = studentNames.get(asText(d.student_id)) || "un élève";
+  const member = asText(d.full_name) || memberNames.get(asText(d.profile_id)) || "un membre";
+  const receipt = asText(d.receipt);
+  switch (action) {
+    case "Paiement enregistré":
+      return `${who} vient d’enregistrer un paiement de ${money(Number(d.amount) || 0)} pour ${student}${d.tranche ? ` (${asText(d.tranche)})` : ""}${receipt ? ` · reçu ${receipt}` : ""}.`;
+    case "Paiement annulé":
+      return `${who} vient d’annuler le paiement${receipt ? ` ${receipt}` : ""} de ${money(Number(d.amount) || 0)} de ${student}${d.reason ? ` · motif : ${asText(d.reason)}` : ""}.`;
+    case "Paiement modifié": {
+      const changes: string[] = [];
+      if (d.nouveau_montant != null && d.ancien_montant !== d.nouveau_montant)
+        changes.push(`montant ${money(Number(d.ancien_montant) || 0)} → ${money(Number(d.nouveau_montant) || 0)}`);
+      if (d.nouvelle_tranche && d.ancienne_tranche !== d.nouvelle_tranche)
+        changes.push(`tranche ${asText(d.ancienne_tranche)} → ${asText(d.nouvelle_tranche)}`);
+      return `${who} vient de modifier le paiement${receipt ? ` ${receipt}` : ""} de ${student}${changes.length ? ` (${changes.join(", ")})` : ""}.`;
+    }
+    case "Élève ajouté":
+      return `${who} vient d’inscrire ${student}${d.matricule ? ` (matricule ${asText(d.matricule)})` : ""}.`;
+    case "Élève modifié":
+      return `${who} vient de modifier la fiche de ${student}.`;
+    case "Membre ajouté":
+      return `${who} vient de créer le compte de ${member}.`;
+    case "Accès membre modifié":
+      return `${who} vient de mettre à jour le compte de ${member}.`;
+    case "Compte secrétaire réactivé":
+      return `${who} vient de réactiver le compte de ${member}.`;
+    case "Compte secrétaire désactivé":
+      return `${who} vient de désactiver le compte de ${member}.`;
+    case "Accès supprimé":
+      return `${who} vient de supprimer l’accès de ${member}.`;
+    case "Période secrétaire modifiée":
+      return `${who} vient de modifier la période de ${member}${d.session_period ? ` (${asText(d.session_period)})` : ""}.`;
+    case "Mot de passe secrétaire réinitialisé":
+      return `${who} vient de réinitialiser le mot de passe de ${member}.`;
+    default:
+      return `Action effectuée par ${who}.`;
+  }
+};
   
 
 function Spinner({ full = false }: { full?: boolean }) {
@@ -343,6 +392,7 @@ function Scolaris() {
 const [dataReady, setDataReady] = useState(!supabase);
 const schoolIdRef = useRef("");
 const profileNamesRef = useRef<Map<string, string>>(new Map());
+const studentNamesRef = useRef<Map<string, string>>(new Map());
 
   const loadDemoData = () => {
     setDataReady(true);
@@ -492,6 +542,10 @@ if (!classResult.data || !studentResult.data || !paymentResult.data) { setDataRe
       });
       const profileNames = new Map((profileResult.data ?? []).map((row) => [row.id, row.full_name]));
       profileNamesRef.current = profileNames as Map<string, string>;
+      const studentNames = new Map<string, string>(
+        studentResult.data.map((row) => [row.id as string, `${row.first_names} ${row.last_name}`] as [string, string]),
+      );
+      studentNamesRef.current = studentNames;
       const memberRoles = new Map((roleResult.data ?? []).map((row) => [row.user_id, row.role]));
       const secretaryOrder = (profileResult.data ?? [])
         .filter((row) => memberRoles.get(row.id) === "secretary")
@@ -545,11 +599,12 @@ if (!classResult.data || !studentResult.data || !paymentResult.data) { setDataRe
           : typeof row.author_id === "string" && memberRoles.get(row.author_id) === "secretary"
             ? row.author_id
             : undefined;
+        const authorName = profileNames.get(row.author_id) ?? "Scolaris";
         return {
           id: String(row.id),
           action: row.action,
-          detail: JSON.stringify(row.details),
-          by: profileNames.get(row.author_id) ?? "Scolaris",
+          detail: describeActivity(row.action, details, authorName, studentNames, profileNames as Map<string, string>),
+          by: authorName,
           date: row.created_at,
           secretaryId,
         };
@@ -613,10 +668,18 @@ const channel = client.channel(`school-${userId}`)
   .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, scheduleRefresh)
   .on("postgres_changes", { event: "*", schema: "public", table: "user_roles" }, scheduleRefresh)
   .on("postgres_changes", { event: "INSERT", schema: "public", table: "activity_log" }, (payload) => {
-    const item = payload.new as { action?: string; details?: Record<string, unknown> };
+    const item = payload.new as { action?: string; details?: Record<string, unknown>; author_id?: string };
     if (role === "founder" && item.action?.startsWith("Paiement ")) {
       setUnreadPayments((count) => count + 1);
-      toast(item.action, { description: JSON.stringify(item.details ?? {}) });
+      toast(item.action, {
+        description: describeActivity(
+          item.action,
+          item.details,
+          profileNamesRef.current.get(item.author_id ?? "") ?? "La secrétaire",
+          studentNamesRef.current,
+          profileNamesRef.current,
+        ),
+      });
     }
     scheduleRefresh();
   })
@@ -704,6 +767,9 @@ return () => {
     URL.revokeObjectURL(a.href);
   };
   const isSecretary = role === "secretary";
+  const currentUserName =
+    teamMembers.find((member) => member.id === userId)?.name ??
+    (isSecretary ? "Fatou Diallo" : "Kouassi Aya");
   const structureOptions = role === "founder"
     ? userId
       ? teamMembers.filter((member) => member.role === "secretary").sort((a, b) => (a.structureNumber ?? 0) - (b.structureNumber ?? 0))
@@ -1091,9 +1157,9 @@ try { localStorage.removeItem("scolaris-nav"); } catch {}
             <span>Paramètres de l’école</span>
           </button>
           <div className="profile">
-            <span className="avatar">{isSecretary ? "FD" : "KA"}</span>
+            <span className="avatar">{initials(currentUserName)}</span>
             <span>
-              <b>{isSecretary ? "Fatou Diallo" : "Kouassi Aya"}</b>
+              <b>{currentUserName}</b>
               <small>{isSecretary ? "Secrétaire" : "Fondatrice"}</small>
             </span>
             <button title="Déconnexion" onClick={() => void logout()}>
@@ -1156,7 +1222,7 @@ try { localStorage.removeItem("scolaris-nav"); } catch {}
               <LogOut size={18} />
             </button>
             <span className="avatar avatar-small">
-              {isSecretary ? "FD" : "KA"}
+              {initials(currentUserName)}
             </span>
           </div>
         </header>
@@ -1173,6 +1239,8 @@ try { localStorage.removeItem("scolaris-nav"); } catch {}
               totalDue={visibleTotalDue}
               totalPaid={visibleTotalPaid}
               isSecretary={isSecretary}
+              userName={currentUserName}
+              schoolName={schoolInfo.name}
               onGo={go}
               onCollect={() => { setStudentId(""); setPaymentId(""); setModal("payment"); }}
               onStudent={(id: string) => {
@@ -1855,6 +1923,8 @@ function Dashboard({
   totalDue,
   totalPaid,
   isSecretary,
+  userName,
+  schoolName,
   onGo,
   onCollect,
   onStudent,
@@ -1866,6 +1936,14 @@ function Dashboard({
       (s: Student) => paid(s.id) > 0 && paid(s.id) < due(s),
     ).length,
     unpaid = students.length - paidCount - partialCount;
+  const todayLabel = new Intl.DateTimeFormat("fr-FR", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  })
+    .format(new Date())
+    .toUpperCase();
   const day = new Date().toISOString().slice(0, 10),
     today = payments
       .filter((p: Payment) => p.date.slice(0, 10) === day)
@@ -1876,10 +1954,10 @@ function Dashboard({
   return (
     <>
       <PageHeading
-        eyebrow="MARDI 13 OCTOBRE 2026 · COCODY"
+        eyebrow={`${todayLabel}${schoolName ? ` · ${String(schoolName).toUpperCase()}` : ""}`}
         title={
           <>
-            Bonjour, Fatou <i className="gold-dot">.</i>
+            Bonjour, {userName} <i className="gold-dot">.</i>
           </>
         }
         description="Voici la situation financière de votre école."
@@ -2049,7 +2127,7 @@ function Dashboard({
                 <i />
                 {log.action}
               </b>
-              <span>{log.detail}</span>
+              <span title={log.detail}>{log.detail}</span>
               <span className="author">
                 <i>{initials(log.by)}</i>
                 {log.by}
